@@ -1,7 +1,7 @@
 
 import os, json, asyncio, math, logging
 from dotenv import load_dotenv
-from upstox_python_sdk import Upstox, MarketDataStreamerV3
+from upstox_sdk import Upstox, MarketDataStreamerV3
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
