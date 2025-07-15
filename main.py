@@ -1,8 +1,11 @@
 
 import os, json, asyncio, math, logging
 from dotenv import load_dotenv
-from upstox_sdk import Upstox, MarketDataStreamerV3
-print("✅ Upstox SDK loaded successfully")
+try:
+    from upstox_sdk import Upstox, MarketDataStreamerV3
+except ModuleNotFoundError:
+    from upstox_python_sdk import Upstox, MarketDataStreamerV3
+print("✅ Upstox SDK loaded OK")
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
