@@ -1,109 +1,89 @@
-
-import os, json, asyncio, math, logging
+ import os, json, asyncio, math, logging
 from dotenv import load_dotenv
-try:
-    from upstox_sdk import Upstox, MarketDataStreamerV3
-except ModuleNotFoundError:
-    from upstox_python_sdk import Upstox, MarketDataStreamerV3
-print("✅ Upstox SDK loaded OK")
+from upstox import Upstox, MarketDataStreamerV3           # ← यही सही import है
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
-load_dotenv()  # reads .env
+# ----------------- CONFIG -----------------
+load_dotenv()                                   # .env से variables लेता है
 
-BOT_TOKEN   = os.getenv("TG_TOKEN")
-CHANNEL_ID  = os.getenv("TG_CH")
-API_KEY     = os.getenv("UP_API_KEY")
-ACCESS      = os.getenv("UP_ACCESS")
-
-if not all([BOT_TOKEN, CHANNEL_ID, API_KEY, ACCESS]):
-    raise RuntimeError("Missing env variables. Check .env file.")
+BOT_TOKEN  = os.getenv("TG_TOKEN")
+CHANNEL_ID = os.getenv("TG_CH")                 # @ChannelUsername
+API_KEY    = os.getenv("UP_API_KEY")
+ACCESS     = os.getenv("UP_ACCESS")             # दिन‑भर का token
 
 LEVEL_FILE = "levels.json"
 if not os.path.exists(LEVEL_FILE):
-    with open(LEVEL_FILE, "w") as f:
-        json.dump([], f)
+    json.dump([], open(LEVEL_FILE, "w"))
+# ------------------------------------------
 
-def load_levels():
-    with open(LEVEL_FILE) as f:
-        return json.load(f)
+def _load():
+    with open(LEVEL_FILE) as f: return json.load(f)
 
-def save_levels(data):
-    with open(LEVEL_FILE, "w") as f:
-        json.dump(data, f)
+def _save(data):
+    with open(LEVEL_FILE, "w") as f: json.dump(data, f)
 
+# ───────── Telegram Commands ─────────
 async def add_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    # /add SYMBOL entry sl target  (fixed order)
     try:
-        parts = update.message.text.split()
-        _, sym, entry, sl, tgt = parts
-        lvls = load_levels()
-        lvls.append({"s": sym.upper(),
-                     "e": float(entry),
-                     "sl": float(sl),
-                     "t": float(tgt),
-                     "st": "wait",
-                     "last": None})
-        save_levels(lvls)
-        await update.message.reply_text(f"✅ Added {sym.upper()} (Entry {entry}, SL {sl}, Target {tgt})")
-    except Exception as e:
-        await update.message.reply_text("❌ Format: /add SYMBOL ENTRY SL TARGET")
+        _, sym, entry, sl, tgt = update.message.text.split()
+        levels = _load()
+        levels.append({"s":sym.upper(),"e":float(entry),"sl":float(sl),
+                       "t":float(tgt),"st":"wait","p":None})
+        _save(levels)
+        await update.message.reply_text(
+            f"✅ {sym.upper()} Added  (Entry {entry}, SL {sl}, Target {tgt})")
+    except Exception:
+        await update.message.reply_text("❌ Format: /add SYM ENTRY SL TARGET")
 
 async def post_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    # /post message text
     msg = update.message.text.partition(' ')[2]
     if msg:
         await ctx.bot.send_message(CHANNEL_ID, msg)
-        await update.message.reply_text("✅ Posted to channel.")
+        await update.message.reply_text("✅ Posted")
     else:
-        await update.message.reply_text("❌ Usage: /post Your message")
+        await update.message.reply_text("❌ Usage: /post Your text")
 
+# ───────── Upstox Price Stream ─────────
 async def main():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
-    app.add_handler(CommandHandler("add", add_cmd))
+    app.add_handler(CommandHandler("add",  add_cmd))
     app.add_handler(CommandHandler("post", post_cmd))
 
-    # Upstox live price
-    u = Upstox(API_KEY, ACCESS)
-    instruments = {i.tradingsymbol: i.token for i in u.get_instruments()}
-    stream = MarketDataStreamerV3(access_token=ACCESS)
+    # Upstox initialise
+    up = Upstox(API_KEY, ACCESS)
+    instrument_map = {i.tradingsymbol:i.token for i in up.get_instruments()}
+    streamer = MarketDataStreamerV3(access_token=ACCESS)
 
     async def on_tick(data):
-        sym = data["tradingsymbol"]
-        ltp = data["ltp"]
-        levels = load_levels()
-        changed = False
-        for lv in levels:
-            if lv["s"] != sym or lv["st"] == "closed":
-                continue
-            if lv["st"] == "wait" and ltp >= lv["e"]:
-                lv["st"] = "active"
-                lv["last"] = math.floor(ltp)
-                await app.bot.send_message(CHANNEL_ID, f"🚀 Entry Triggered {sym} @ ₹{ltp}")
+        sym, ltp = data["tradingsymbol"], data["ltp"]
+        lvls = _load(); changed = False
+        for lv in lvls:
+            if lv["s"]!=sym or lv["st"]=="closed": continue
+            if lv["st"]=="wait" and ltp>=lv["e"]:
+                lv.update(st="live", p=math.floor(ltp))
+                await app.bot.send_message(CHANNEL_ID, f"🚀 Entry {sym} @₹{ltp}")
                 changed = True
-            elif lv["st"] == "active":
-                if ltp >= lv["last"] + 1 and ltp < lv["t"]:
-                    lv["last"] += 1
+            elif lv["st"]=="live":
+                if ltp>=lv["p"]+1 and ltp<lv["t"]:
+                    lv["p"] += 1
                     await app.bot.send_message(CHANNEL_ID, f"📈 {sym} ₹{ltp}")
                     changed = True
-                if ltp >= lv["t"]:
-                    lv["st"] = "closed"
-                    await app.bot.send_message(CHANNEL_ID, f"🎯 Target Achieved {sym} @ ₹{ltp}")
+                if ltp>=lv["t"]:
+                    lv["st"]="closed"
+                    await app.bot.send_message(CHANNEL_ID, f"🎯 Target {sym} @₹{ltp}")
                     changed = True
-                elif ltp <= lv["sl"]:
-                    lv["st"] = "closed"
-                    await app.bot.send_message(CHANNEL_ID, f"🛑 Stoploss Hit {sym} @ ₹{ltp}")
+                elif ltp<=lv["sl"]:
+                    lv["st"]="closed"
+                    await app.bot.send_message(CHANNEL_ID, f"🛑 SL {sym} @₹{ltp}")
                     changed = True
-        if changed:
-            save_levels(levels)
+        if changed: _save(lvls)
 
-    subs = []
-    for lv in load_levels():
-        if lv["s"] in instruments:
-            subs.append(instruments[lv["s"]])
-    if subs:
-        stream.subscribe(subs)
-        stream.start_stream(callback=on_tick)
+    # subscribe tokens for already‑added levels
+    tokens = [instrument_map[x["s"]] for x in _load() if x["s"] in instrument_map]
+    if tokens:
+        streamer.subscribe(tokens)
+        streamer.start_stream(callback=on_tick)
 
     await app.initialize()
     await app.start()
@@ -111,5 +91,6 @@ async def main():
     await asyncio.Event().wait()
 
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s - %(message)s")
+    logging.basicConfig(level=logging.INFO)
+    print("✅ Upstox SDK loaded OK")
     asyncio.run(main())
